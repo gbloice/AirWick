@@ -1,6 +1,7 @@
-/// @dir radioBlip2
-/// Send out a radio packet every minute, consuming as little power as possible.
-// 2012-05-09 <jc@wippler.nl> http://opensource.org/licenses/mit-license.php
+/// @dir AirWick
+/// Room sensor - JeeNode micro in an AirWick housing
+/// Based on radioBlib2 by <jc@wippler.nl> http://opensource.org/licenses/mit-license.php
+// 2013-03-28 <github@bloice.co.uk>
 
 #include <JeeLib.h>
 #include <avr/sleep.h>
@@ -12,12 +13,22 @@
 #define BLIP_ID   1   // set this to a unique ID to disambiguate multiple nodes
 #define SEND_MODE 3   // set to 3 if fuses are e=06/h=DE/l=CE, else set to 2
 
+#define DHT_PIN   8   // DIO2 of JeeNode Micro marked as RX/PA2. Port Pin 1
+
+#if defined (DHT_PIN)
+  DHTxx dht (DHT_PIN);
+#endif
+
 struct {
   long ping;      // 32-bit counter
   byte id :7;     // identity, should be different for each node
   byte boost :1;  // whether compiled for boost chip or not
   byte vcc1;      // VCC before transmit, 1.0V = 0 .. 6.0V = 250
   byte vcc2;      // battery voltage (BOOST=1), or VCC after transmit (BOOST=0)
+#if defined(DHT_PIN)
+  int  temp;      // Temp from dht
+  int  humidity;  // humidity from dht
+#endif
 } payload;
 
 volatile bool adcDone;
@@ -113,6 +124,16 @@ void loop() {
   if (vcc >= VCC_OK) { // enough energy for normal operation
 #if BOOST
     payload.vcc2 = analogRead(0) >> 2;
+#endif
+#if defined (DHT_PIN)
+    int t, h;
+    if (dht.reading(t, h, true)) {
+      payload.temp = t;
+      payload.humidity = h;
+    }
+    else {
+      payload.temp = payload.humidity = 0;
+    }
 #endif
     sendPayload();
 #if !BOOST
