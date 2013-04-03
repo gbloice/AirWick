@@ -134,6 +134,7 @@ void loop() {
       payload.humidity = (int)(DHT.humidity * 10);
     }
     else {
+      payload.temp = payload.humidity = 0;
     }
 #endif
     sendPayload();
