@@ -5,18 +5,19 @@
 
 #include <JeeLib.h>
 #include <avr/sleep.h>
+#include <dht.h>
 
 #define BOOST     0   // measure battery on analog pin if 1, else vcc after
 
 #define BLIP_NODE 22  // wireless node ID to use for sending blips
 #define BLIP_GRP  5   // wireless net group to use for sending blips
-#define BLIP_ID   1   // set this to a unique ID to disambiguate multiple nodes
+#define BLIP_ID   2   // set this to a unique ID to disambiguate multiple nodes
 #define SEND_MODE 3   // set to 3 if fuses are e=06/h=DE/l=CE, else set to 2
 
 #define DHT_PIN   8   // DIO2 of JeeNode Micro marked as RX/PA2. Port Pin 1
 
 #if defined (DHT_PIN)
-  DHTxx dht (DHT_PIN);
+  dht DHT;
 #endif
 
 struct {
@@ -28,6 +29,7 @@ struct {
 #if defined(DHT_PIN)
   int  temp;      // Temp from dht
   int  humidity;  // humidity from dht
+  byte status;    // status from dht;
 #endif
 } payload;
 
@@ -126,13 +128,12 @@ void loop() {
     payload.vcc2 = analogRead(0) >> 2;
 #endif
 #if defined (DHT_PIN)
-    int t, h;
-    if (dht.reading(t, h, true)) {
-      payload.temp = t;
-      payload.humidity = h;
+    payload.status = DHT.read22(DHT_PIN);
+    if (payload.status == DHTLIB_OK) {
+      payload.temp = (int)(DHT.temperature * 10);
+      payload.humidity = (int)(DHT.humidity * 10);
     }
     else {
-      payload.temp = payload.humidity = 0;
     }
 #endif
     sendPayload();
