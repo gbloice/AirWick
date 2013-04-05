@@ -1,7 +1,7 @@
 /// @dir AirWick
 /// Room sensor - JeeNode micro in an AirWick housing
 /// Based on radioBlib2 by <jc@wippler.nl> http://opensource.org/licenses/mit-license.php
-// 2013-03-28 <github@bloice.co.uk>
+/// 2013-03-28 <github@bloice.co.uk>
 
 #include <JeeLib.h>
 #include <avr/sleep.h>
