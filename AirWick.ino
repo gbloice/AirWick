@@ -7,34 +7,56 @@
 #include <avr/sleep.h>
 #include <dht.h>
 
-#define BOOST     0   // measure battery on analog pin if 1, else vcc after
-
 #define BLIP_NODE 22  // wireless node ID to use for sending blips
 #define BLIP_GRP  5   // wireless net group to use for sending blips
 #define BLIP_ID   2   // set this to a unique ID to disambiguate multiple nodes
 #define SEND_MODE 3   // set to 3 if fuses are e=06/h=DE/l=CE, else set to 2
 
+#define PIR_PIN   7   // AIO2 of JeeNode Micro marked as PA3/TX. Port Pin 2 (also PCINT3)
 #define DHT_PIN   8   // DIO2 of JeeNode Micro marked as RX/PA2. Port Pin 1
+#define LED_PIN  10   // DIO1 of JeeNode Micro marked as PA0/DIO. Port Pin 4
 
-#if defined (DHT_PIN)
-  dht DHT;
-#endif
+#define LED_ON_TIME 2 // LED ON time in 10ths of mS
+#define LED_OFF_TIME 3 // LED OFF time in 10ths of mS
+#define LED_IDLE_TIME 600 // LED IDLE time before retrigger in 10ths of mS
+
+enum LED_STATE { LED_IDLE, LED_ON1, LED_OFF1, LED_ON2, LED_OFF2 };
+LED_STATE ledState = LED_IDLE;
+
+enum TASKS { SEND_BLIP, FLASH_LED, TASK_LIMIT };
+static word schedBuff[TASK_LIMIT];
+Scheduler scheduler(schedBuff, TASK_LIMIT);
+
+dht DHT;
 
 struct {
   long ping;      // 32-bit counter
-  byte id :7;     // identity, should be different for each node
-  byte boost :1;  // whether compiled for boost chip or not
+  byte id;        // identity, should be different for each node
   byte vcc1;      // VCC before transmit, 1.0V = 0 .. 6.0V = 250
   byte vcc2;      // battery voltage (BOOST=1), or VCC after transmit (BOOST=0)
-#if defined(DHT_PIN)
   int  temp;      // Temp from dht
   int  humidity;  // humidity from dht
   byte status;    // status from dht;
-#endif
+  byte pirCount;  // count of PIR activations
 } payload;
 
-volatile bool adcDone;
+volatile bool ledFlashing = false;
 
+volatile byte pirCount = 0;
+// For the PIR, use a pin change interrupt to count triggers and enable the LED flasher task
+ISR(PCINT0_vect) {
+  if (digitalRead(PIR_PIN) == LOW) {
+    if (pirCount < 255) {
+      pirCount++;
+    }
+    if (!ledFlashing) {
+      ledFlashing = true;
+      scheduler.timer(FLASH_LED, 0);
+    }
+  }
+}
+
+volatile bool adcDone;
 // for low-noise/-power ADC readouts, we'll use ADC completion interrupts
 ISR(ADC_vect) { adcDone = true; }
 
@@ -83,7 +105,22 @@ void setup() {
   rf12_sleep(RF12_SLEEP);
 
   payload.id = BLIP_ID;
-  payload.boost = BOOST;
+  payload.pirCount = 0;
+  
+  // Set the PIR pin to input and the LED to output and off
+  pinMode(PIR_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
+  
+  // Enable the PIR interrupts
+  PCMSK0 |= bit(PCINT3);
+  GIMSK |= bit(PCIE0);
+ 
+  // Set the LED state machine
+  ledState = LED_IDLE;
+
+  // Start the scheduler running
+  scheduler.timer(SEND_BLIP, 0);
 }
 
 static byte sendPayload () {
@@ -113,37 +150,72 @@ static byte sendPayload () {
 #define VCC_FINAL 70  // <= 2.4V - send anyway, might be our last swan song
 
 void loop() {
-  byte vcc = payload.vcc1 = vccRead();
   
-  if (vcc <= VCC_FINAL) { // hopeless, maybe we can get one last packet out
-    sendPayload();
-    vcc = 1; // don't even try reading VCC after this send
-#if !BOOST
-    payload.vcc2 = vcc;
-#endif
-  }
-
-  if (vcc >= VCC_OK) { // enough energy for normal operation
-#if BOOST
-    payload.vcc2 = analogRead(0) >> 2;
-#endif
-#if defined (DHT_PIN)
-    payload.status = DHT.read22(DHT_PIN);
-    if (payload.status == DHTLIB_OK) {
-      payload.temp = (int)(DHT.temperature * 10);
-      payload.humidity = (int)(DHT.humidity * 10);
+  switch(scheduler.pollWaiting()) {
+    case SEND_BLIP: {
+      // Make the required measurements and send the data
+      byte vcc = payload.vcc1 = vccRead();
+      if (vcc <= VCC_FINAL) { // hopeless, maybe we can get one last packet out
+        sendPayload();
+        vcc = 1; // don't even try reading VCC after this send
+        payload.vcc2 = vcc;
+      }
+    
+      if (vcc >= VCC_OK) { // enough energy for normal operation
+        payload.status = DHT.read22(DHT_PIN);
+        if (payload.status == DHTLIB_OK) {
+          payload.temp = (int)(DHT.temperature * 10);
+          payload.humidity = (int)(DHT.humidity * 10);
+        }
+        else {
+          payload.temp = payload.humidity = 0;
+        }
+        payload.pirCount = pirCount;
+        pirCount = 0;
+        sendPayload();
+        vcc = payload.vcc2 = vccRead(); // measure and remember the VCC drop
+      }
+      
+      // Setup another blip
+      scheduler.timer(SEND_BLIP, VCC_SLEEP_MINS(vcc) * 600);
+      break;
     }
-    else {
-      payload.temp = payload.humidity = 0;
-    }
-#endif
-    sendPayload();
-#if !BOOST
-    vcc = payload.vcc2 = vccRead(); // measure and remember the VCC drop
-#endif
+      
+    case FLASH_LED:
+      // Flash the LED twice for the PIR trigger then wait for a bit
+      switch(ledState) {
+        case LED_IDLE:
+          // The LED flashing has started,set the LED on and reschedule
+          digitalWrite(LED_PIN, LOW);
+          ledState = LED_ON1;
+          scheduler.timer(FLASH_LED, LED_ON_TIME);
+        break;
+        case LED_ON1:
+          // Set the LED off and reschedule
+          digitalWrite(LED_PIN, HIGH);
+          ledState = LED_OFF1;
+          scheduler.timer(FLASH_LED, LED_OFF_TIME);
+        break;
+        case LED_OFF1:
+          // The LED has finished the first flash cycle, set it on again
+          digitalWrite(LED_PIN, LOW);
+          ledState = LED_ON2;
+          scheduler.timer(FLASH_LED, LED_ON_TIME);
+        break;
+        case LED_ON2:
+          // Set the LED off and reschedule
+          digitalWrite(LED_PIN, HIGH);
+          ledState = LED_OFF2;
+          scheduler.timer(FLASH_LED, LED_IDLE_TIME);
+        break;
+        case LED_OFF2:
+          // The LED has finished the second flash
+          // Cancel the schedule, allow the LED to be triggered again
+          ledState = LED_IDLE;
+          scheduler.cancel(FLASH_LED);
+          ledFlashing = false;
+        break;
+      }
+      break;
   }
-
-  byte minutes = VCC_SLEEP_MINS(vcc);
-  while (minutes-- > 0)
-    Sleepy::loseSomeTime(60000);
 }
